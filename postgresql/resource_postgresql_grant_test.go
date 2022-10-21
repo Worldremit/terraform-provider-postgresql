@@ -347,6 +347,98 @@ func TestAccPostgresqlGrant(t *testing.T) {
 	})
 }
 
+func TestAccPostgresqlGrantMulti(t *testing.T) {
+	skipIfNotAcc(t)
+
+	// We have to create the database outside of resource.Test
+	// because we need to create tables to assert that grant are correctly applied
+	// and we don't have this resource yet
+	dbSuffix, teardown := setupTestDatabase(t, true, true)
+	defer teardown()
+
+	testTables := []string{"test_schema.test_table", "test_schema.test_table2"}
+	createTestTables(t, dbSuffix, testTables, "")
+
+	dbName, roleName := getTestDBNames(dbSuffix)
+
+	// create a TF config with placeholder for privileges
+	// it will be filled in each step.
+	var testGrant = fmt.Sprintf(`
+	resource "postgresql_role" "my_role" {
+	  for_each = toset(["test_multi_1_%s", "test_multi_2_%s", "test_multi_3_%s", "test_multi_4_%s", "test_multi_5_%s", "test_multi_6_%s"])
+	  name     = each.value
+	  login    = true
+	  password = "mypass"
+	}
+	
+	resource "postgresql_grant" "test" {
+	  for_each    = postgresql_role.my_role
+	  database    = "%s"
+	  role        = each.value["name"]
+	  schema      = "public"
+	  object_type = "schema"
+	  privileges  = %%s
+	}
+
+	`, dbSuffix, dbSuffix, dbSuffix, dbSuffix, dbSuffix, dbSuffix, dbName)
+
+	resource.Test(t, resource.TestCase{
+		PreCheck: func() {
+			testAccPreCheck(t)
+			testCheckCompatibleVersion(t, featurePrivileges)
+		},
+		Providers: testAccProviders,
+		Steps: []resource.TestStep{
+			{
+				Config: fmt.Sprintf(testGrant, `["CREATE"]`),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr(
+						"postgresql_grant.test", "id", fmt.Sprintf("%s_%s_test_schema_table", roleName, dbName),
+					),
+					resource.TestCheckResourceAttr("postgresql_grant.test", "privileges.#", "1"),
+					resource.TestCheckResourceAttr("postgresql_grant.test", "privileges.0", "SELECT"),
+					func(*terraform.State) error {
+						return testCheckTablesPrivileges(t, dbName, roleName, testTables, []string{"SELECT"})
+					},
+				),
+			},
+			{
+				Config: fmt.Sprintf(testGrant, `["SELECT", "INSERT", "UPDATE"]`, `["SELECT", "INSERT", "UPDATE"]`, `["SELECT", "INSERT", "UPDATE"]`),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("postgresql_grant.test", "privileges.#", "3"),
+					resource.TestCheckResourceAttr("postgresql_grant.test", "privileges.0", "INSERT"),
+					resource.TestCheckResourceAttr("postgresql_grant.test", "privileges.1", "SELECT"),
+					resource.TestCheckResourceAttr("postgresql_grant.test", "privileges.2", "UPDATE"),
+					func(*terraform.State) error {
+						return testCheckTablesPrivileges(t, dbName, roleName, testTables, []string{"SELECT", "INSERT", "UPDATE"})
+					},
+				),
+			},
+			// We reapply the first step to be sure that extra privileges are correctly granted.
+			{
+				Config: fmt.Sprintf(testGrant, `["SELECT"]`, `["SELECT"]`, `["SELECT"]`),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("postgresql_grant.test", "privileges.#", "1"),
+					resource.TestCheckResourceAttr("postgresql_grant.test", "privileges.0", "SELECT"),
+					func(*terraform.State) error {
+						return testCheckTablesPrivileges(t, dbName, roleName, testTables, []string{"SELECT"})
+					},
+				),
+			},
+			// We test to revoke everything
+			{
+				Config: fmt.Sprintf(testGrant, `[]`, `[]`, `[]`),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr("postgresql_grant.test", "privileges.#", "0"),
+					func(*terraform.State) error {
+						return testCheckTablesPrivileges(t, dbName, roleName, testTables, []string{})
+					},
+				),
+			},
+		},
+	})
+}
+
 func TestAccPostgresqlGrantObjects(t *testing.T) {
 	skipIfNotAcc(t)
 

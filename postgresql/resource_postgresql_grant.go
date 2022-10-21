@@ -3,11 +3,11 @@ package postgresql
 import (
 	"database/sql"
 	"fmt"
-	"log"
-	"strings"
-
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
+	"log"
+	"strings"
+	"sync"
 
 	// Use Postgres as SQL driver
 	"github.com/lib/pq"
@@ -117,6 +117,10 @@ func resourcePostgreSQLGrantRead(db *DBConnection, d *schema.ResourceData) error
 	return readRolePrivileges(txn, d)
 }
 
+var (
+	rvRoleMu = sync.Mutex{}
+)
+
 func resourcePostgreSQLGrantCreate(db *DBConnection, d *schema.ResourceData) error {
 	if err := validateFeatureSupport(db, d); err != nil {
 		return fmt.Errorf("feature is not supported: %v", err)
@@ -138,6 +142,9 @@ func resourcePostgreSQLGrantCreate(db *DBConnection, d *schema.ResourceData) err
 	}
 
 	database := d.Get("database").(string)
+	//Transaction is not thread safe so using standard golang lock
+	rvRoleMu.Lock()
+	defer rvRoleMu.Unlock()
 
 	txn, err := startTransaction(db.client, database)
 	if err != nil {
@@ -189,6 +196,9 @@ func resourcePostgreSQLGrantDelete(db *DBConnection, d *schema.ResourceData) err
 		return fmt.Errorf("feature is not supported: %v", err)
 	}
 
+	//Transaction is not thread safe so using standard golang lock
+	rvRoleMu.Lock()
+	defer rvRoleMu.Unlock()
 	txn, err := startTransaction(db.client, d.Get("database").(string))
 	if err != nil {
 		return err
